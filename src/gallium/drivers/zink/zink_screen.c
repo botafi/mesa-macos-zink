@@ -2927,6 +2927,13 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_MESA_KOSMICKRISP:
       screen->driver_workarounds.implicit_sync = false;
       break;
+   case VK_DRIVER_ID_MOLTENVK:
+      /* Metal WSI consumes the present wait semaphores in MoltenVK's own
+       * command buffer. It has no dma-buf implicit synchronization to bridge;
+       * the extra CPU fence wait in kopper_present only serializes frames.
+       */
+      screen->driver_workarounds.implicit_sync = false;
+      break;
    default:
       break;
    }
