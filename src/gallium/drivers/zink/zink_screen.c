@@ -644,11 +644,14 @@ zink_init_shader_caps(struct zink_screen *screen)
 
       caps->int16 = screen->info.feats.features.shaderInt16;
 
+      uint32_t max_samplers = screen->info.props.limits.maxPerStageDescriptorSamplers;
+      uint32_t max_sampled_images = screen->info.props.limits.maxPerStageDescriptorSampledImages;
+      if (zink_use_update_after_bind_samplers(screen)) {
+         max_samplers = screen->info.desc_indexing_props.maxPerStageDescriptorUpdateAfterBindSamplers;
+         max_sampled_images = screen->info.desc_indexing_props.maxPerStageDescriptorUpdateAfterBindSampledImages;
+      }
       caps->max_texture_samplers =
-      caps->max_sampler_views =
-         MIN2(MIN2(screen->info.props.limits.maxPerStageDescriptorSamplers,
-                   screen->info.props.limits.maxPerStageDescriptorSampledImages),
-              PIPE_MAX_SAMPLERS);
+      caps->max_sampler_views = MIN3(max_samplers, max_sampled_images, PIPE_MAX_SAMPLERS);
 
       /* TODO: this limitation is dumb, and will need some fixes in mesa */
       caps->max_shader_buffers =
@@ -2922,6 +2925,13 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_MESA_PANVK:
    case VK_DRIVER_ID_MESA_NVK:
    case VK_DRIVER_ID_MESA_KOSMICKRISP:
+      screen->driver_workarounds.implicit_sync = false;
+      break;
+   case VK_DRIVER_ID_MOLTENVK:
+      /* Metal WSI consumes the present wait semaphores in MoltenVK's own
+       * command buffer. It has no dma-buf implicit synchronization to bridge;
+       * the extra CPU fence wait in kopper_present only serializes frames.
+       */
       screen->driver_workarounds.implicit_sync = false;
       break;
    default:
