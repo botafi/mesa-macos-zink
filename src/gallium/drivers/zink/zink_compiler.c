@@ -4025,6 +4025,17 @@ compile_module(struct zink_screen *screen, struct zink_shader *zs, nir_shader *n
 
    NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
 
+   /* MoltenVK's SPIR-V to MSL translation preserves this texture name,
+    * which shadows Metal's sampler type and prevents pipeline compilation.
+    * Only change the diagnostic name; resource bindings stay the same.
+    */
+   if (zink_driverid(screen) == VK_DRIVER_ID_MOLTENVK) {
+      nir_foreach_variable_in_shader(var, nir) {
+         if (var->name && !strcmp(var->name, "sampler"))
+            nir_variable_set_name(nir, var, "zink_sampler");
+      }
+   }
+
    if (zink_debug & (ZINK_DEBUG_NIR | ZINK_DEBUG_SPIRV))
       nir_index_ssa_defs(nir_shader_get_entrypoint(nir));
    if (zink_debug & ZINK_DEBUG_NIR) {
