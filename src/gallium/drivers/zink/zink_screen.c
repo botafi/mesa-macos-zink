@@ -644,11 +644,14 @@ zink_init_shader_caps(struct zink_screen *screen)
 
       caps->int16 = screen->info.feats.features.shaderInt16;
 
+      uint32_t max_samplers = screen->info.props.limits.maxPerStageDescriptorSamplers;
+      uint32_t max_sampled_images = screen->info.props.limits.maxPerStageDescriptorSampledImages;
+      if (zink_use_update_after_bind_samplers(screen)) {
+         max_samplers = screen->info.desc_indexing_props.maxPerStageDescriptorUpdateAfterBindSamplers;
+         max_sampled_images = screen->info.desc_indexing_props.maxPerStageDescriptorUpdateAfterBindSampledImages;
+      }
       caps->max_texture_samplers =
-      caps->max_sampler_views =
-         MIN2(MIN2(screen->info.props.limits.maxPerStageDescriptorSamplers,
-                   screen->info.props.limits.maxPerStageDescriptorSampledImages),
-              PIPE_MAX_SAMPLERS);
+      caps->max_sampler_views = MIN3(max_samplers, max_sampled_images, PIPE_MAX_SAMPLERS);
 
       /* TODO: this limitation is dumb, and will need some fixes in mesa */
       caps->max_shader_buffers =

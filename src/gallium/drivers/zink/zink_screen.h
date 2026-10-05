@@ -147,6 +147,29 @@ zink_driver_is_venus(const struct zink_screen *screen)
    return screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_VENUS;
 }
 
+static inline bool
+zink_use_update_after_bind_samplers(const struct zink_screen *screen)
+{
+   const struct zink_device_info *info = &screen->info;
+
+   /* MoltenVK's ordinary sampler limit describes direct Metal bindings. Its
+    * larger update-after-bind limits describe tier-2 argument buffers. Only
+    * use those limits when sampler layouts and their pools use that path.
+    * Reserve enough descriptors for every graphics stage at Gallium's limit.
+    */
+   return zink_driverid(screen) == VK_DRIVER_ID_MOLTENVK &&
+          zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_LAZY &&
+          info->have_EXT_descriptor_indexing &&
+          info->desc_indexing_feats.descriptorBindingSampledImageUpdateAfterBind &&
+          info->desc_indexing_feats.descriptorBindingUniformTexelBufferUpdateAfterBind &&
+          info->desc_indexing_props.maxPerStageDescriptorUpdateAfterBindSamplers >
+             info->props.limits.maxPerStageDescriptorSamplers &&
+          info->desc_indexing_props.maxDescriptorSetUpdateAfterBindSamplers >=
+             ZINK_GFX_SHADER_COUNT * PIPE_MAX_SAMPLERS &&
+          info->desc_indexing_props.maxDescriptorSetUpdateAfterBindSampledImages >=
+             ZINK_GFX_SHADER_COUNT * PIPE_MAX_SAMPLERS;
+}
+
 void
 zink_screen_lock_context(struct zink_screen *screen);
 void

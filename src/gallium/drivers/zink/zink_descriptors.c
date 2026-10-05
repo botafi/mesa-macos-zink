@@ -36,6 +36,20 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 
+static bool
+is_sampler_descriptor_type(VkDescriptorType type)
+{
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_SAMPLER:
+   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+   case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static VkDescriptorSetLayout
 descriptor_layout_create(struct zink_screen *screen, enum zink_descriptor_type t, VkDescriptorSetLayoutBinding *bindings, unsigned num_bindings)
 {
@@ -56,6 +70,15 @@ descriptor_layout_create(struct zink_screen *screen, enum zink_descriptor_type t
    fci.pBindingFlags = flags;
    for (unsigned i = 0; i < num_bindings; i++) {
       flags[i] = 0;
+      if (zink_use_update_after_bind_samplers(screen) &&
+          is_sampler_descriptor_type(bindings[i].descriptorType)) {
+         /* This layout flag selects the larger descriptor-indexing limits;
+          * the matching pool flag is set in create_pool(). Lazy descriptor
+          * sets are still retired with their batch before reuse.
+          */
+         dcslci.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+         flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+      }
    }
    dcslci.bindingCount = num_bindings;
    dcslci.pBindings = bindings;
@@ -854,6 +877,14 @@ create_pool(struct zink_screen *screen, unsigned num_type_sizes, const VkDescrip
    dpci.pPoolSizes = sizes;
    dpci.poolSizeCount = num_type_sizes;
    dpci.flags = flags;
+   if (zink_use_update_after_bind_samplers(screen)) {
+      for (unsigned i = 0; i < num_type_sizes; i++) {
+         if (is_sampler_descriptor_type(sizes[i].type)) {
+            dpci.flags |= VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+            break;
+         }
+      }
+   }
    dpci.maxSets = MAX_LAZY_DESCRIPTORS;
    VkResult result;
    VRAM_ALLOC_LOOP(result,
@@ -893,7 +924,7 @@ alloc_new_pool(struct zink_screen *screen, struct zink_descriptor_pool_multi *mp
    struct zink_descriptor_pool *pool = CALLOC_STRUCT(zink_descriptor_pool);
    if (!pool)
       return NULL;
-   const unsigned num_type_sizes = mpool->pool_key->sizes[1].descriptorCount ? 2 : 1;
+   const unsigned num_type_sizes = mpool->pool_key->num_type_sizes;
    pool->pool = create_pool(screen, num_type_sizes, mpool->pool_key->sizes, 0);
    if (!pool->pool) {
       FREE(pool);
