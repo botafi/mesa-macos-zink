@@ -222,6 +222,10 @@ struct emit_memory_barrier {
          *queue_import = true;
       }
       VkAccessFlags src_flags = res->obj->unordered_access_stage ? res->obj->unordered_access_stage : res->obj->access_stage;
+      if (src_flags & VK_PIPELINE_STAGE_TRANSFER_BIT && pipeline & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT &&
+          imb.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT && imb.dstAccessMask & VK_ACCESS_SHADER_READ_BIT &&
+          !ctx->unordered_blitting && cmdbuf == ctx->bs->cmdbuf)
+         ctx->last_transfer_sync = ctx->rp_counter;
       VKCTX(CmdPipelineBarrier)(
           cmdbuf,
           src_flags ? src_flags : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -247,6 +251,10 @@ struct emit_memory_barrier {
       bmb.pNext = NULL;
       bmb.srcAccessMask = src_flags;
       bmb.dstAccessMask = flags;
+      if (stages & VK_PIPELINE_STAGE_TRANSFER_BIT && pipeline & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT &&
+          bmb.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT && bmb.dstAccessMask & VK_ACCESS_SHADER_READ_BIT &&
+          !ctx->unordered_blitting && cmdbuf == ctx->bs->cmdbuf)
+         ctx->last_transfer_sync = ctx->rp_counter;
       VKCTX(CmdPipelineBarrier)(
           cmdbuf,
           stages,
@@ -287,6 +295,10 @@ struct emit_memory_barrier<barrier_KHR_synchronzation2> {
          1,
          &imb
          };
+      if (imb.srcStageMask & VK_PIPELINE_STAGE_TRANSFER_BIT && imb.dstStageMask & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT &&
+          imb.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT && imb.dstAccessMask & VK_ACCESS_SHADER_READ_BIT &&
+          !ctx->unordered_blitting && cmdbuf == ctx->bs->cmdbuf)
+         ctx->last_transfer_sync = ctx->rp_counter;
       VKCTX(CmdPipelineBarrier2)(cmdbuf, &dep);
    }
 
@@ -317,6 +329,10 @@ struct emit_memory_barrier<barrier_KHR_synchronzation2> {
           0,
           NULL
       };
+      if (bmb.srcStageMask & VK_PIPELINE_STAGE_TRANSFER_BIT && bmb.dstStageMask & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT &&
+          bmb.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT && bmb.dstAccessMask & VK_ACCESS_SHADER_READ_BIT &&
+          !ctx->unordered_blitting && cmdbuf == ctx->bs->cmdbuf)
+         ctx->last_transfer_sync = ctx->rp_counter;
       VKCTX(CmdPipelineBarrier2)(cmdbuf, &dep);
    }
 };
@@ -380,9 +396,6 @@ apply_new_access(struct zink_context *ctx, struct zink_resource *res, VkAccessFl
       if (is_write) {
          res->obj->unordered_access = flags;
          res->obj->unordered_access_stage = pipeline;
-         /* these should get automatically emitted during submission */
-         ctx->bs->unordered_write_access |= flags;
-         ctx->bs->unordered_write_stages |= pipeline;
       } else {
          if (zink_resource_access_is_write(res->obj->unordered_access)) {
             res->obj->unordered_access = 0;
@@ -509,8 +522,6 @@ zink_resource_image_transfer_dst_barrier(struct zink_context *ctx, struct zink_r
       res->obj->last_write = VK_ACCESS_TRANSFER_WRITE_BIT;
       res->obj->unordered_access_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
-      ctx->bs->unordered_write_access |= VK_ACCESS_TRANSFER_WRITE_BIT;
-      ctx->bs->unordered_write_stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
       if (!zink_resource_usage_matches(res, ctx->bs)) {
          res->obj->access = VK_ACCESS_TRANSFER_WRITE_BIT;
          res->obj->access_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -540,8 +551,6 @@ zink_resource_buffer_transfer_dst_barrier(struct zink_context *ctx, struct zink_
       res->obj->last_write = VK_ACCESS_TRANSFER_WRITE_BIT;
       res->obj->unordered_access_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
-      ctx->bs->unordered_write_access |= VK_ACCESS_TRANSFER_WRITE_BIT;
-      ctx->bs->unordered_write_stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
       if (!zink_resource_usage_matches(res, ctx->bs)) {
          res->obj->access = VK_ACCESS_TRANSFER_WRITE_BIT;
          res->obj->access_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -577,8 +586,7 @@ zink_pipeline_flags_from_stage(VkShaderStageFlagBits stage)
 ALWAYS_INLINE static bool
 resource_needs_barrier(struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline, bool unordered)
 {
-   return zink_resource_access_is_write(unordered ? res->obj->unordered_access : res->obj->access) ||
-          zink_resource_access_is_write(flags) ||
+   return zink_resource_access_is_write(flags) ||
           ((unordered ? res->obj->unordered_access_stage : res->obj->access_stage) & pipeline) != pipeline ||
           ((unordered ? res->obj->unordered_access : res->obj->access) & flags) != flags;
 }
@@ -601,6 +609,12 @@ zink_resource_memory_barrier(struct zink_context *ctx, struct zink_resource *res
    bool unordered_usage_matches = res->obj->unordered_access && usage_matches;
    bool unordered = unordered_res_exec(ctx, res, is_write);
    assert(!UNSYNCHRONIZED || !usage_matches);
+   if (res->obj->transfer_rp && res->obj->transfer_rp < ctx->last_transfer_sync && !unordered &&
+       res->obj->access == VK_ACCESS_TRANSFER_WRITE_BIT && res->obj->access_stage == VK_PIPELINE_STAGE_TRANSFER_BIT) {
+      res->obj->transfer_rp = 0;
+      res->obj->access |= VK_ACCESS_SHADER_READ_BIT;
+      res->obj->access_stage |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+   }
    if (!resource_needs_barrier(res, flags, pipeline, unordered))
       return;
    if (completed) {
@@ -631,9 +645,10 @@ zink_resource_memory_barrier(struct zink_context *ctx, struct zink_resource *res
    bool can_skip_unordered = !unordered || UNSYNCHRONIZED ? false : !needs_access;
    /* ordered barriers can be skipped if both:
     * - there is no current access
-    * - there is no current-batch unordered access
+    * - current access is copied from unordered (this is synchronized automatically during submit)
+    * - there is also no current-batch unordered access
     */
-   bool can_skip_ordered = unordered || UNSYNCHRONIZED ? false : (!res->obj->access && !unordered_usage_matches);
+   bool can_skip_ordered = unordered || UNSYNCHRONIZED ? false : unordered_usage_matches ? res->obj->ordered_access_is_copied : !res->obj->access;
    if (ctx->no_reorder)
       can_skip_unordered = can_skip_ordered = false;
 

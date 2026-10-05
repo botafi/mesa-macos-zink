@@ -138,9 +138,6 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
       zink_fence_reference(screen, mfence, NULL);
    util_dynarray_clear(&bs->fences);
 
-   bs->unordered_write_access = VK_ACCESS_NONE;
-   bs->unordered_write_stages = VK_PIPELINE_STAGE_NONE;
-
    /* only increment batch generation if previously in-use to avoid false detection of batch completion */
    if (bs->fence.submitted)
       bs->usage.submit_count++;
@@ -268,6 +265,7 @@ zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs
    util_dynarray_fini(&bs->fd_wait_semaphore_stages);
    util_dynarray_fini(&bs->tracked_semaphores);
    util_dynarray_fini(&bs->acquire_flags);
+   util_dynarray_fini(&bs->fences);
    unsigned num_mfences = util_dynarray_num_elements(&bs->fence.mfences, void *);
    struct zink_tc_fence **mfence = bs->fence.mfences.data;
    for (unsigned i = 0; i < num_mfences; i++) {
@@ -783,17 +781,16 @@ submit_queue(void *data, void *gdata, int thread_index)
       );
    }
    if (bs->has_reordered_work) {
-      if (bs->unordered_write_access) {
-         VkMemoryBarrier mb;
-         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-         mb.pNext = NULL;
-         mb.srcAccessMask = bs->unordered_write_access;
-         mb.dstAccessMask = VK_ACCESS_NONE;
-         VKSCR(CmdPipelineBarrier)(bs->reordered_cmdbuf,
-                                   bs->unordered_write_stages,
-                                   screen->info.have_KHR_synchronization2 ? VK_PIPELINE_STAGE_NONE : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                   0, 1, &mb, 0, NULL, 0, NULL);
-      }
+      VkMemoryBarrier mb;
+      mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      mb.pNext = NULL;
+      /* big sync hammer: everything here must complete before the main cmdbuf */
+      mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+      mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+      VKSCR(CmdPipelineBarrier)(bs->reordered_cmdbuf,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 0, 1, &mb, 0, NULL, 0, NULL);
       VRAM_ALLOC_LOOP(result,
          VKSCR(EndCommandBuffer)(bs->reordered_cmdbuf),
          if (result != VK_SUCCESS) {
@@ -960,6 +957,9 @@ zink_end_batch(struct zink_context *ctx)
    } else {
       submit_queue(bs, NULL, 0);
    }
+
+   ctx->last_transfer_sync = 0;
+   ctx->rp_counter = 0;
 
 #if HAVE_RENDERDOC_INTEGRATION
    if (!(ctx->flags & ZINK_CONTEXT_COPY_ONLY) && screen->renderdoc_capturing && !screen->renderdoc_capture_all &&
@@ -1198,7 +1198,7 @@ zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usag
    if (!zink_batch_usage_exists(u))
       return true;
    /* this batch state was already completed and reset */
-   if (u->submit_count - submit_count > 1)
+   if (zink_batch_submit_count_diff(u->submit_count, submit_count) > 1)
       return true;
    if (zink_batch_usage_is_unflushed(u)) {
       if (likely(u == &ctx->bs->usage)) {
@@ -1224,7 +1224,7 @@ batch_usage_wait(struct zink_context *ctx, struct zink_batch_usage *u, unsigned 
    if (!zink_batch_usage_exists(u))
       return;
    /* this batch state was already completed and reset */
-   if (u->submit_count - submit_count > 1)
+   if (zink_batch_submit_count_diff(u->submit_count, submit_count) > 1)
       return;
    if (zink_batch_usage_unflushed_wait(ctx, u, submit_count, trywait))
       zink_wait_on_batch(ctx, u->usage);

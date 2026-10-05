@@ -150,6 +150,11 @@ blit_resolve(struct zink_context *ctx, const struct pipe_blit_info *info, bool *
                      1, &region);
    zink_cmd_debug_marker_end(ctx, cmdbuf, marker);
 
+   if (cmdbuf == ctx->bs->cmdbuf && ctx->track_renderpasses) {
+      ctx->needs_transfer_sync = true;
+      dst->obj->transfer_rp = ctx->rp_counter;
+   }
+
    return true;
 }
 
@@ -345,6 +350,11 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info, bool *n
 
    zink_cmd_debug_marker_end(ctx, cmdbuf, marker);
 
+   if (cmdbuf == ctx->bs->cmdbuf && ctx->track_renderpasses) {
+      ctx->needs_transfer_sync = true;
+      dst->obj->transfer_rp = ctx->rp_counter;
+   }
+
    return true;
 }
 
@@ -392,9 +402,12 @@ zink_blit(struct pipe_context *pctx,
       if (resolve == info->dst.resource) {
          zink_batch_no_rp_safe(ctx);
          ctx->awaiting_resolve = false;
+         ctx->rp_tc_info_updated = true;
          return;
       }
    }
+   if (dst->fb_bind_count)
+      ctx->rp_tc_info_updated = true;
 
    if (zink_is_swapchain(dst)) {
       if (!zink_kopper_acquire(ctx, dst, UINT64_MAX))
